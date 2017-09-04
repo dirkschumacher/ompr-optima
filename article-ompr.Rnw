@@ -1,0 +1,196 @@
+\documentclass{optima}
+\usepackage[sc]{mathpazo}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage[backend=bibtex]{biblatex}
+
+
+\begin{document}
+
+\head{Dirk Schumacher}{Mixed integer linear programming in R with \emph{ompr}}
+
+<<setup, include=FALSE, cache=FALSE>>=
+library(knitr)
+# set global chunk options
+opts_chunk$set(fig.path='figure/optima-', fig.align='center', fig.show='hold')
+options(formatR.arrow=TRUE,width=90)
+@
+
+\noindent
+R \cite{r} is a popular language and computational environment among statisticians. In recent years R has gained a lot of popularity in other disciplines as well. With over 11,000 packages on CRAN \cite{cran}, the R package repository, there is a package for almost every problem. And of course, packages for solving mixed integer linear programs are also available. R as a language makes it easy to create domain specific languages through metaprogramming using so-called non-standard evaluation \cite{advancedr}.
+
+\emph{ompr} (the optimization modelling package) \cite{ompr} is an attempt to develop an algebraic modelling language within R. The goal is to create a modelling API that uses idiomatic R and integrates well with other popular packages, such as \emph{dplyr} for data processing. \emph{ompr} models are solver-independent and currently support mixed integer linear programming problems. It works on all platforms supported by R (Linux, MacOS and Windows). Compared to other modelling languages it comes closest to \emph{JuMP} \cite{jump} for \emph{julia} but is currently more limited in terms of features and scope. In fact \emph{JuMP} inspired me to build \emph{ompr}.
+
+The features of \emph{ompr} are best described by modelling a mixed integer linear program in R. As an example for this article we model a \emph{warehouse location problem} where we would like to find the cost optimal location and number of warehouses and the assignment of customers to those hubs.
+
+\begin{figure}[h]
+\begin{equation*}
+\begin{array}{lll@{}}
+\text{min}  & \displaystyle\sum\limits_{i=1}^{n}\sum\limits_{j=1}^{m}\operatorname{tc}_{i,j} \cdot x_{i, j} & +  \sum\limits_{j=1}^{m}\operatorname{fc}_{j} \cdot y_{j}\\
+\text{subject to} & \displaystyle\sum\limits_{j=1}^{m}   x_{i, j} = 1  & \forall\,i=1 ,\ldots, n\\
+                  & \displaystyle x_{i, j} \leq y_j,  & \forall\,i=1 ,\ldots, n,\,j=1 ,\ldots, m\\
+                 &                                                x_{i,j} \in \{0,1\} &\forall\,i=1 ,\ldots, n,\,j=1 ,\ldots, m\\
+                 &                                                y_{j} \in \{0,1\} &\forall\,j=1 ,\ldots, m
+\end{array}
+\end{equation*}
+\caption{A warehouse location problem as an illustrative example. $n$ customers need to be assigned to exactly one of at most $m$ warehouses. Setting up a warehouse $y_j=1$ has a fixed cost of $\operatorname{fc}_j>0$ and assigning a customer to a warehouse $x_{i,j}=1$ leads to travel cost of $\operatorname{tc}_{i,j}>0$.}
+\end{figure}
+
+<<params, echo=FALSE, cache=TRUE>>=
+set.seed(1234)
+grid_size <- 1000
+n <- 100
+customer_locations <- data.frame(
+  id = 1:n,
+  x = round(runif(n) * grid_size),
+  y = round(runif(n) * grid_size)
+)
+m <- 20
+warehouse_locations <- data.frame(
+  id = 1:m,
+  x = round(runif(m) * grid_size),
+  y = round(runif(m) * grid_size)
+)
+fcv <- round(rnorm(m, mean = grid_size * 10, sd = grid_size * 5))
+fc <- function(i) fcv[i]
+
+tc <- function(i, j) {
+  customer <- customer_locations[i, ]
+  warehouse <- warehouse_locations[j, ]
+  round(sqrt((customer$x - warehouse$x)^2 + (customer$y - warehouse$y)^2))
+}
+
+
+
+library(magrittr)
+@
+
+Every \emph{ompr} model starts with an empty model to which necessary elements (like variables, constraints and an objective function) are added. Expressions can be mixed with  variables defined in the general environment. For example in the model below the functions $\operatorname{tc}$ and $\operatorname{fc}$ are not part of the optimization problem, but are regular R functions defined in the environment. Like other algebraic domain specific languages, equations can be written down directly and the package takes care of transforming these to the required format for the API of the solver.
+
+\begin{figure}[h]
+\begin{small}
+<<model, cache=TRUE, dependson="params">>=
+library(ompr)
+model <- MIPModel() %>%
+  add_variable(x[i, j], i=1:n, j=1:m, type="binary") %>%
+  add_variable(y[j], j=1:m, type="binary") %>%
+  set_objective(
+    sum_expr(tc(i, j) * x[i, j], i=1:n, j=1:m) +
+    sum_expr(fc(j) * y[j], j=1:m),
+    sense = "min") %>%
+  add_constraint(sum_expr(x[i, j], j=1:m) == 1, i=1:n) %>%
+  add_constraint(x[i, j] <= y[j], i=1:n, j=1:m)
+@
+\end{small}
+\caption{The \emph{warehouse location problem} modeled with \emph{ompr} using so called pipes to chain together successive functions. }
+\end{figure}
+
+After an \emph{ompr} model is built, it can be passed to a solver. Within \emph{ompr} a solver is simply a function mapping a model to a solution. In this case the GNU Linear Programming Kit \cite{glpk} is used to find an optimal solution. To support most popular solvers out of the box, the package \emph{ompr.roi} can be used. It makes it possible to use any solver supported by the \emph{R optimization infrastructure} (\emph{ROI}) packages \cite{roi}. \emph{ROI} gives access to many open source (\emph{CLP}, \emph{GLPK}, \emph{lpsolve}, \emph{Symphony}) and commercial solvers (\emph{CPLEX}, \emph{Gurobi}) through a standardized interface.
+
+\begin{figure}[h]
+\begin{small}
+<<solve, cache=TRUE, dependson="model">>=
+library(ompr.roi)
+library(ROI.plugin.glpk)
+result <- solve_model(model, with_ROI(solver = "glpk"))
+assignment <- get_solution(result, x[i, j])
+warehouses <- get_solution(result, y[i])
+@
+\end{small}
+\caption{The model defined earlier is solved with the GNU Linear Programming Kit using the solver package \emph{ompr.roi} which offers access to a variety of open source and commercial solvers.}
+\end{figure}
+
+The result can then be further processed within the R ecosystem. For example using R's plotting facilities, we can plot the assignment (Figure \ref{fig:ompr_fig_warehouse}).
+<<echo=FALSE, message=FALSE>>=
+library(ggplot2)
+p <- ggplot(customer_locations, aes(x, y)) +
+  geom_point() +
+  geom_point(data = warehouse_locations, color = "red", alpha = 0.5, shape = 17) +
+  scale_x_continuous(limits = c(0, grid_size)) +
+  scale_y_continuous(limits = c(0, grid_size)) +
+  theme(axis.title = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text = element_blank(), panel.grid = element_blank())
+
+library(dplyr)
+library(ompr)
+matching <- result %>%
+  get_solution(x[i,j]) %>%
+  filter(value > 0.9) %>%
+  select(i, j)
+@
+
+\begin{figure}[h]
+<<figure,echo=FALSE,fig.height=5>>=
+plot_assignment <- matching %>%
+  inner_join(customer_locations, by = c("i" = "id")) %>%
+  inner_join(warehouse_locations, by = c("j" = "id"))
+customer_count <- matching %>% group_by(j) %>% summarise(n = n()) %>% rename(id = j)
+plot_warehouses <- warehouse_locations %>%
+  mutate(costs = fcv) %>%
+  inner_join(customer_count, by = "id") %>%
+  filter(id %in% unique(matching$j))
+p +
+  geom_segment(data = plot_assignment, aes(x = x.y, y = y.y, xend = x.x, yend = y.x)) +
+  geom_point(data  = plot_warehouses, color = "red", size = 3, shape = 17) +
+  ggrepel::geom_label_repel(data  = plot_warehouses,
+                            aes(label = paste0("fixed costs:", costs, "; customers: ", n)),
+                            size = 2, nudge_y = 20)
+@
+\caption{A solution to the warehouse location problem generated by \emph{ggplot2} and \emph{ompr}.}
+\label{fig:ompr_fig_warehouse}
+\end{figure}
+
+Currently \emph{ompr}'s cost of abstraction can be rather high for larger models, but this is something I plan to work on in the future. Up to now the focus has been on creating an idiomatic API for modelling mixed integer linear programs directly in R. \emph{ompr} as well as \emph{ompr.roi} are published on CRAN and developed on GitHub. The packages are open source and I encourage anyone to send feedback, ideas or code contributions. On the project's website \cite{ompr} I have compiled some articles showcasing the modelling features of the package and tutorials on how to model selected optimization problems in R with \emph{ompr}.
+
+In my opinion a big advantage of modelling optimization problems in R is the ability to easily utilize other packages within the R ecosystem for data wrangling, statistics, (interactive) visualizations and reproducible research. For example, this article was generated in a completely reproducible manner with \emph{knitr} \cite{knitr} and the code shown here is the actual code that led to the output in Figure \ref{fig:ompr_fig_warehouse}; it is published on GitHub (\url{https://github.com/dirkschumacher/ompr-optima}) as well.
+
+
+\begin{jinfo}
+Dirk Schumacher, Berlin, Germany. \href{mailto:mail@dirk-schumacher.net}{\url{mail@dirk-schumacher.net}}
+
+\end{jinfo}
+
+\begin{thebibliography}{3}
+
+\bibitem{advancedr}
+Hadley Wickham.
+\newblock Advanced R.
+\newblock CRC Press, 2014.
+
+\bibitem{r}
+ R Development Core Team.
+ \newblock R: A language and environment for statistical computing.
+ \newblock R Foundation for Statistical Computing, Vienna, Austria. ISBN 3-900051-07-0, URL \url{https://www.R-project.org}, 2008.
+
+\bibitem{ompr}
+Dirk Schumacher.
+\newblock ompr: optimization modelling package.
+\newblock R package version 0.6, \url{https://cran.r-project.org/package=ompr}, 2017.
+
+\bibitem{cran}
+CRAN: The Comprehensive R Archive Network.
+\newblock \url{https://cran.r-project.org/}, 2017-07-16.
+
+\bibitem{roi}
+Kurt Hornik and David Meyer and Florian Schwendinger and Stefan Theussl.
+\newblock ROI: R Optimization Infrastructure.
+\newblock R package version 0.2-1, \url{https://cran.r-project.org/package=ROI}, 2016.
+
+\bibitem{jump}
+Dunning, Iain and Joey Huchette and Miles Lubin.
+\newblock JuMP: A modeling language for mathematical optimization.
+\newblock SIAM Review 59.2 (2017): 295-320.
+
+\bibitem{glpk}
+GNU Linear Programming Kit.
+\newblock \url{http://www.gnu.org/software/glpk/glpk.html}, 2017.
+
+\bibitem{knitr}
+Yihui Xie.
+\newblock knitr: A General-Purpose Package for Dynamic Report Generation in R.
+\newblock R package version 1.1, 2017.
+
+\end{thebibliography}
+
+\end{document}
